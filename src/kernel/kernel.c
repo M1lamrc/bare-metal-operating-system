@@ -8,13 +8,13 @@ typedef unsigned int   uint32_t;
 #define WHITE_ON_BLACK 0x07
 #define GREEN_ON_BLACK 0x0A
 
-// --- Global Değişkenler ---
+
 static int global_cursor_offset = 0;
 static int shift_pressed = 0;
 char shell_buffer[256];
 int shell_ptr = 0;
 
-// --- Temel I/O ---
+
 void outb(uint16_t port, uint8_t val) {
     asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -25,7 +25,7 @@ unsigned char inb(uint16_t port) {
     return ret;
 }
 
-// --- Klavye Tablosu ---
+
 unsigned char scancode_to_ascii[] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
     '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
@@ -33,7 +33,7 @@ unsigned char scancode_to_ascii[] = {
     '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
 };
 
-// --- Yardımcı Fonksiyonlar ---
+
 int strcmp(char *s1, char *s2) {
     int i;
     for (i = 0; s1[i] == s2[i]; i++) {
@@ -76,10 +76,10 @@ void kprint(char *message, unsigned char color) {
     update_cursor(global_cursor_offset);
 }
 
-// --- Shell Mantığı ---
+
 void execute_command(char *cmd) {
     if (strcmp(cmd, "help") == 0) {
-        kprint("\nKomutlar: HELP, VER, CLEAR, STG (that command [the STG] means STart Gui, that command is unavailable for real GUI mode use)", WHITE_ON_BLACK);
+        kprint("\nCommands: HELP, VER, CLEAR, STG (that command [the STG] means STart Gui, that command is unavailable for real GUI mode use)", WHITE_ON_BLACK);
     } 
     else if (strcmp(cmd, "ver") == 0) {
         kprint("\nCodename: MRC v0.0.1 Beta (closed for end user distribution)", GREEN_ON_BLACK);
@@ -102,7 +102,7 @@ void shell_input_handler() {
         if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
         if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
         
-        if (scancode == 0x0E) { // Backspace
+        if (scancode == 0x0E) {
             if (shell_ptr > 0) {
                 shell_ptr--;
                 global_cursor_offset -= 2;
@@ -114,9 +114,7 @@ void shell_input_handler() {
             return;
         }
 		if (scancode == 0x4B) { 
-    // Satır başına (C:\> kısmına) dayandıysak daha fazla sola gitme
-    // Not: Satır başı offsetini her komut geldiğinde güncellemek en sağlıklısıdır
-    // Şimdilik sadece mevcut satırın başındaki prompt'u koruyalım:
+
     int current_line_start = (global_cursor_offset / (MAX_COLS * 2)) * (MAX_COLS * 2) + 10;
     
     if (global_cursor_offset > current_line_start) { 
@@ -126,10 +124,9 @@ void shell_input_handler() {
     return;
 }
 
-// Sağ Ok Tuşu
+
 if (scancode == 0x4D) {
-    // Sadece shell_ptr kadar sağa gitmesine izin ver
-    // Yani yazdığın metnin en sonuna kadar:
+
     int line_start_offset = (global_cursor_offset / (MAX_COLS * 2)) * (MAX_COLS * 2) + 10;
     int max_allowed_offset = line_start_offset + (shell_ptr * 2);
 
@@ -140,7 +137,7 @@ if (scancode == 0x4D) {
     return;
 }
         if (scancode & 0x80) return;
-        if (scancode == 0x1C) { // Enter
+        if (scancode == 0x1C) {
             shell_buffer[shell_ptr] = '\0';
             execute_command(shell_buffer);
             shell_ptr = 0;
@@ -161,7 +158,6 @@ if (scancode == 0x4D) {
     }
 }
 
-// --- KERNEL ENTRY POINT ---
 void kmain(void) {
     clear_screen();
     kprint("-boot success-\n", GREEN_ON_BLACK);
