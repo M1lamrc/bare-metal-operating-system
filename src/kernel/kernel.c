@@ -23,7 +23,7 @@ typedef struct {
     int is_directory;
 } File;
 char current_dir[64] = "/";
-File mrc_fs[MAX_FILES];i
+File mrc_fs[MAX_FILES];
 
 void resolve_path(char *target, int silent);
 void silent_cd(char *target);
