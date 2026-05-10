@@ -1,0 +1,1147 @@
+typedef unsigned char  uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int   uint32_t;
+typedef signed char int8_t;
+typedef unsigned long long uint64_t;
+typedef unsigned long      uintptr_t;
+
+int gui_win_curr_x = 10;
+int gui_win_curr_y = 10;
+#include "gui.h"
+
+
+uint32_t* GOP_FRAMEBUFFER = 0;
+uint32_t  GOP_PIXELS_PER_SCANLINE = 0;
+
+#define MAX_ROWS 25
+#define MAX_COLS 80
+
+#define GREEN_ON_BLACK    0x0A
+#define WHITE_ON_BLACK    0x0F
+#define YELLOW_ON_BLACK   0x0E
+#define RED_ON_BLACK      0x04
+#define LBLUE_ON_BLACK    0x09
+
+#define MAX_FILES 10
+#define MODE_TERMINAL 0
+#define MODE_GUI      1
+int current_mode = MODE_TERMINAL;
+int global_cursor_x = 10;
+int global_cursor_y = 30;
+
+uint32_t MAX_COLS_PIXELS = 1024;
+uint32_t MAX_HEIGHT = 768;
+
+void draw_char(char c, int x, int y, uint32_t color);
+void clear_screen();
+int find_file_in_current_dir(char *filename);
+void execute_command(char *cmd);
+uint32_t vga_to_rgb(uint8_t vga_color) {
+    switch (vga_color) {
+        case 0x0A: return 0xFF55FF55;
+        case 0x03: return 0xFF55FFFF;
+        case 0x0F: return 0xFFFFFFFF;
+        case 0x0E: return 0xFFFFFF55;
+        case 0x04: return 0xFFAA0000;
+        case 0x09: return 0xFF5555FF;
+        default:   return 0xFFFFFFFF;
+    }
+}
+
+typedef struct {
+    char name[64];
+    char content[1024];
+    char folder[64];
+    int is_active;
+    int is_directory;
+} File;
+
+char current_dir[64] = "/";
+File mrc_fs[MAX_FILES];
+unsigned char scancode_to_ascii[] = {
+    0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
+    '\t', 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', '[', ']', '\n',
+    0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', ';', '\'', '`', 0,
+    '\\', 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '/', 0, '*', 0, ' '
+};
+int mouse_x = 100;
+int mouse_y = 100;
+int mouse_phase = 0;
+uint8_t mouse_data[3];
+void resolve_path(char *target, int silent);
+void silent_cd(char *target);
+void kprint(char *message, unsigned char color);
+void terminal_scroll();
+int strcmp(char *s1, char *s2);
+int strncmp(char *s1, char *s2, int n);
+void strcpy(char *dest, char *src);
+
+static int shift_pressed = 0;
+char shell_buffer[256];
+int shell_ptr = 0;
+
+void outb(uint16_t port, uint8_t val) { asm volatile ("outb %0, %1" : : "a"(val), "Nd"(port)); }
+void outw(uint16_t port, uint16_t val) { asm volatile ("outw %0, %1" : : "a"(val), "Nd"(port)); }
+unsigned char inb(uint16_t port) { unsigned char ret; asm volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port)); return ret; }
+void draw_terminal_cursor(int x, int y, int state) {
+
+    int cursor_height = 18;
+    int cursor_width = 2;
+
+    uint32_t color = state ? 0xFFFFFFFF : 0x00000000;
+
+    for (int i = 0; i < cursor_height; i++) {
+        for (int j = 0; j < cursor_width; j++) {
+            int px = x + j;
+
+            int py = y - 14 + i;
+
+ 
+if (px >= 0 && (uint32_t)px < MAX_COLS_PIXELS && py >= 0 && (uint32_t)py < MAX_HEIGHT) {
+    GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = color;
+}
+        }
+    }
+}
+
+ 
+int gui_mode_active = 0; 
+
+
+
+
+void strcpy(char *dest, char *src) {
+    int i = 0;
+    while (src[i] != '\0') { dest[i] = src[i]; i++; }
+    dest[i] = '\0';
+}
+
+int strcmp(char *s1, char *s2) {
+    int i;
+    for (i = 0; s1[i] == s2[i]; i++) { if (s1[i] == '\0') return 0; }
+    return s1[i] - s2[i];
+}
+
+int strncmp(char *s1, char *s2, int n) {
+    for (int i = 0; i < n; i++) {
+        if (s1[i] != s2[i]) return s1[i] - s2[i];
+        if (s1[i] == '\0') return 0;
+    }
+    return 0;
+}
+void cmd_cat(char *path_input) {
+    if (path_input[0] == '\0') {
+        kprint("\nusage: cat <file_path>", YELLOW_ON_BLACK);
+        return;
+    }
+
+    char saved_dir[64];
+    strcpy(saved_dir, current_dir);
+
+    char path_part[64];
+    char filename[16];
+    int last_slash = -1;
+
+
+    for (int i = 0; path_input[i] != '\0'; i++) {
+        if (path_input[i] == '/') last_slash = i;
+    }
+
+    if (last_slash != -1) {
+
+        int i;
+        for (i = 0; i < last_slash; i++) {
+            path_part[i] = path_input[i];
+        }
+        path_part[i] = '\0';
+
+
+        if (last_slash == 0) {
+            strcpy(path_part, "/");
+        }
+
+
+        strcpy(filename, path_input + last_slash + 1);
+
+
+        silent_cd(path_part);
+    } else {
+
+        strcpy(filename, path_input);
+    }
+
+    int idx = find_file_in_current_dir(filename);
+
+    if (idx != -1) {
+        kprint("\n", WHITE_ON_BLACK);
+        kprint(mrc_fs[idx].content, YELLOW_ON_BLACK);
+        kprint("\n", WHITE_ON_BLACK);
+    } else {
+        kprint("\nerror: can't find the ", RED_ON_BLACK);
+        kprint(filename, RED_ON_BLACK);
+    }
+
+
+    strcpy(current_dir, saved_dir);
+}
+ 
+void mouse_wait(uint8_t type);
+void mouse_write(uint8_t write);
+uint8_t mouse_read();
+void handle_ps2_mouse();
+void draw_mouse_cursor(int x, int y);
+void clear_mouse_cursor(int x, int y);
+void cmd_touch(char *path_input) {
+    if (path_input[0] == '\0') return;
+
+    char saved_dir[64];
+    strcpy(saved_dir, current_dir);
+
+    char path_part[64];
+    char filename[16];
+    int last_slash = -1;
+
+    for (int i = 0; path_input[i] != '\0'; i++) {
+        if (path_input[i] == '/') last_slash = i;
+    }
+
+    if (last_slash != -1) {
+        int i;
+        for (i = 0; i < last_slash; i++) path_part[i] = path_input[i];
+        path_part[i] = '\0';
+        if (last_slash == 0) strcpy(path_part, "/");
+
+        strcpy(filename, path_input + last_slash + 1);
+
+        silent_cd(path_part);
+    } else {
+        strcpy(filename, path_input);
+    }
+
+
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(mrc_fs[i].is_active &&
+           strcmp(mrc_fs[i].name, filename) == 0 &&
+           strcmp(mrc_fs[i].folder, current_dir) == 0) {
+            kprint("\nerror: there's already something with that name", RED_ON_BLACK);
+            strcpy(current_dir, saved_dir);
+            return;
+        }
+    }
+
+    int created = 0;
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(!mrc_fs[i].is_active) {
+            strcpy(mrc_fs[i].name, filename);
+            strcpy(mrc_fs[i].folder, current_dir);
+            strcpy(mrc_fs[i].content, "");
+            mrc_fs[i].is_active = 1;
+            mrc_fs[i].is_directory = 0;
+            created = 1;
+            break;
+        }
+    }
+
+    if(created) kprint("\nsuccessfully created", GREEN_ON_BLACK);
+    else kprint("\nerror: not enough space", RED_ON_BLACK);
+
+
+    strcpy(current_dir, saved_dir);
+}
+void init_fs() {
+    for(int i = 0; i < MAX_FILES; i++) mrc_fs[i].is_active = 0;
+
+    strcpy(mrc_fs[0].name, "note.txt");
+    strcpy(mrc_fs[0].content, "sample text");
+    strcpy(mrc_fs[0].folder, "/");
+    mrc_fs[0].is_active = 1;
+    mrc_fs[0].is_directory = 0;
+}
+void cmd_ls() {
+    kprint("\n directory: ", YELLOW_ON_BLACK);
+    kprint(current_dir, WHITE_ON_BLACK);
+    kprint("\n", WHITE_ON_BLACK);
+
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(mrc_fs[i].is_active && strcmp(mrc_fs[i].folder, current_dir) == 0) {
+            if(mrc_fs[i].is_directory) kprint("[DIR] ", LBLUE_ON_BLACK);
+            else kprint("      ", WHITE_ON_BLACK);
+
+            kprint(mrc_fs[i].name, GREEN_ON_BLACK);
+            kprint("\n", WHITE_ON_BLACK);
+        }
+    }
+}
+
+void cmd_edit(char *filename) {
+    int file_idx = -1;
+
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(mrc_fs[i].is_active && strcmp(mrc_fs[i].name, filename) == 0) {
+            file_idx = i;
+            break;
+        }
+    }
+
+    if(file_idx == -1) {
+        kprint("\nerror: not found", RED_ON_BLACK);
+        return;
+    }
+
+
+    clear_screen();
+    kprint(" ", YELLOW_ON_BLACK);
+    kprint(filename, WHITE_ON_BLACK);
+    kprint("\n(to save and exit, press ESC)\n\n", WHITE_ON_BLACK);
+
+
+    kprint(mrc_fs[file_idx].content, WHITE_ON_BLACK);
+
+    int content_ptr = 0;
+
+    while(mrc_fs[file_idx].content[content_ptr] != '\0') content_ptr++;
+
+    while(1) {
+        if (inb(0x64) & 0x01) {
+            unsigned char scancode = inb(0x60);
+
+            if (scancode == 0x01) break;
+
+            if (!(scancode & 0x80)) {
+                if (scancode == 0x1C) {
+                    mrc_fs[file_idx].content[content_ptr++] = '\n';
+                    kprint("\n", WHITE_ON_BLACK);
+                }
+else if (scancode == 0x0E) {
+    if (content_ptr > 0) {
+
+        content_ptr--;
+        mrc_fs[file_idx].content[content_ptr] = '\0';
+    }
+}
+                else if (scancode < sizeof(scancode_to_ascii)) {
+                    char ascii = scancode_to_ascii[scancode];
+                    if (ascii != 0 && content_ptr < 127) {
+                        mrc_fs[file_idx].content[content_ptr++] = ascii;
+                        mrc_fs[file_idx].content[content_ptr] = '\0';
+                        char t[2] = {ascii, '\0'};
+                        kprint(t, WHITE_ON_BLACK);
+                    }
+                }
+            }
+        }
+    }
+
+
+    clear_screen();
+    kprint("file is successfully saved\n", GREEN_ON_BLACK);
+    kprint("MRC> ", WHITE_ON_BLACK);
+}
+void cmd_mkdir(char *path_input) {
+    if (path_input[0] == '\0') return;
+
+    char saved_dir[64];
+    strcpy(saved_dir, current_dir);
+
+
+    if (path_input[0] == '/') {
+        strcpy(current_dir, "/");
+    }
+
+    char path[64];
+    strcpy(path, path_input);
+
+    int p_idx = (path[0] == '/') ? 1 : 0;
+    char folder_name[32];
+
+    while (1) {
+        int f_idx = 0;
+        while (path[p_idx] != '/' && path[p_idx] != '\0') {
+            folder_name[f_idx++] = path[p_idx++];
+        }
+        folder_name[f_idx] = '\0';
+
+        if (f_idx > 0) {
+
+            int found_idx = -1;
+            for (int i = 0; i < MAX_FILES; i++) {
+                if (mrc_fs[i].is_active && mrc_fs[i].is_directory &&
+                    strcmp(mrc_fs[i].name, folder_name) == 0 &&
+                    strcmp(mrc_fs[i].folder, current_dir) == 0) {
+                    found_idx = i;
+                    break;
+                }
+            }
+
+            if (found_idx == -1) {
+
+                int created = 0;
+                for (int i = 0; i < MAX_FILES; i++) {
+                    if (!mrc_fs[i].is_active) {
+                        strcpy(mrc_fs[i].name, folder_name);
+                        strcpy(mrc_fs[i].folder, current_dir);
+                        mrc_fs[i].is_active = 1;
+                        mrc_fs[i].is_directory = 1;
+                        created = 1;
+                        break;
+                    }
+                }
+                if (!created) {
+                    kprint("\nerror: not enough space", RED_ON_BLACK);
+                    strcpy(current_dir, saved_dir);
+                    return;
+                }
+            }
+
+
+            silent_cd(folder_name);
+        }
+
+        if (path[p_idx] == '\0') break;
+        p_idx++;
+    }
+
+    kprint("\nsuccess", GREEN_ON_BLACK);
+    strcpy(current_dir, saved_dir);
+}
+void execute_gui_command(char *cmd) {
+     
+     
+     
+    execute_command(cmd);
+}
+
+void resolve_path(char *target, int silent) {
+    if (target[0] == '\0') return;
+
+    if (strcmp(target, "/") == 0) {
+        strcpy(current_dir, "/");
+        if (!silent) kprint("\nlocation: /", GREEN_ON_BLACK);
+        return;
+    }
+
+    char path[64];
+    strcpy(path, target);
+
+    if (path[0] == '/') {
+        strcpy(current_dir, "/");
+    }
+
+    int p_idx = (path[0] == '/') ? 1 : 0;
+    char folder_name[32];
+
+    while (1) {
+        int f_idx = 0;
+        while (path[p_idx] != '/' && path[p_idx] != '\0') {
+            folder_name[f_idx++] = path[p_idx++];
+        }
+        folder_name[f_idx] = '\0';
+
+        if (f_idx > 0) {
+            if (strcmp(folder_name, "..") == 0) {
+                if (strcmp(current_dir, "/") != 0) {
+                    int len = 0; while(current_dir[len] != '\0') len++;
+                    int i = len - 1;
+                    while (i > 0 && current_dir[i] != '/') { current_dir[i] = '\0'; i--; }
+                    if (i > 0 && current_dir[i] == '/') current_dir[i] = '\0';
+                }
+            } else {
+                int found_idx = -1;
+                for (int i = 0; i < MAX_FILES; i++) {
+                    if (mrc_fs[i].is_active && mrc_fs[i].is_directory &&
+                        strcmp(mrc_fs[i].name, folder_name) == 0 &&
+                        strcmp(mrc_fs[i].folder, current_dir) == 0) {
+                        found_idx = i;
+                        break;
+                    }
+                }
+
+                if (found_idx != -1) {
+                    if (strcmp(current_dir, "/") != 0) {
+                        int l = 0; while(current_dir[l] != '\0') l++;
+                        current_dir[l] = '/'; current_dir[l+1] = '\0';
+                    }
+                    int clen = 0; while(current_dir[clen] != '\0') clen++;
+                    strcpy(current_dir + (clen == 1 && current_dir[0] == '/' ? 1 : clen), folder_name);
+                } else {
+                    if (!silent) {
+                        kprint("\ncan't found that path (", RED_ON_BLACK);
+                        kprint(folder_name, RED_ON_BLACK);
+                        kprint(")", RED_ON_BLACK);
+                    }
+                    return;
+                }
+            }
+        }
+        if (path[p_idx] == '\0') break;
+        p_idx++;
+    }
+
+    if (!silent) {
+        kprint("\nlocation: ", GREEN_ON_BLACK);
+        kprint(current_dir, GREEN_ON_BLACK);
+    }
+}
+
+void cmd_cd(char *target) {
+    resolve_path(target, 0);
+}
+
+void silent_cd(char *target) {
+    resolve_path(target, 1);
+}
+void cmd_rm(char *path_input) {
+    if (path_input[0] == '\0') return;
+
+    char saved_dir[64];
+    strcpy(saved_dir, current_dir);
+
+    char path_part[64];
+    char target_name[16];
+    char target_full_path[64];
+    int last_slash = -1;
+
+    for (int i = 0; path_input[i] != '\0'; i++) {
+        if (path_input[i] == '/') last_slash = i;
+    }
+
+    if (last_slash != -1) {
+        int i;
+        for (i = 0; i < last_slash; i++) path_part[i] = path_input[i];
+        path_part[i] = '\0';
+        if (last_slash == 0) strcpy(path_part, "/");
+        strcpy(target_name, path_input + last_slash + 1);
+        silent_cd(path_part);
+    } else {
+        strcpy(target_name, path_input);
+    }
+
+
+    strcpy(target_full_path, current_dir);
+    if (strcmp(target_full_path, "/") != 0) {
+        int len = 0; while(target_full_path[len]) len++;
+        target_full_path[len] = '/';
+        target_full_path[len+1] = '\0';
+    }
+    int tlen = 0; while(target_full_path[tlen]) tlen++;
+    strcpy(target_full_path + (tlen == 1 && target_full_path[0] == '/' ? 1 : tlen), target_name);
+
+
+    int idx = -1;
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(mrc_fs[i].is_active && strcmp(mrc_fs[i].name, target_name) == 0 && strcmp(mrc_fs[i].folder, current_dir) == 0) {
+            idx = i; break;
+        }
+    }
+
+    if(idx != -1) {
+
+        if(mrc_fs[idx].is_directory) {
+            for(int i = 0; i < MAX_FILES; i++) {
+                if(mrc_fs[i].is_active) {
+                    int j = 0; int match = 1;
+                    while(target_full_path[j] != '\0') {
+                        if(mrc_fs[i].folder[j] != target_full_path[j]) { match = 0; break; }
+                        j++;
+                    }
+                    if(match) { mrc_fs[i].is_active = 0; mrc_fs[i].name[0] = '\0'; }
+                }
+            }
+        }
+        mrc_fs[idx].is_active = 0;
+        mrc_fs[idx].name[0] = '\0';
+        kprint("\nsuccessfully removed", GREEN_ON_BLACK);
+    }
+
+
+    int j = 0;
+    int path_was_cut = 1;
+    while (target_full_path[j] != '\0') {
+        if (saved_dir[j] != target_full_path[j]) {
+            path_was_cut = 0;
+            break;
+        }
+        j++;
+    }
+
+    if (path_was_cut && (saved_dir[j] == '/' || saved_dir[j] == '\0')) {
+        strcpy(current_dir, "/");
+        kprint("\nturning to root", YELLOW_ON_BLACK);
+    } else {
+        strcpy(current_dir, saved_dir);
+    }
+}
+
+void terminal_scroll() {
+    uint32_t line_height = 20;
+    for (uint32_t y = 0; y < MAX_HEIGHT - line_height; y++) {
+        for (uint32_t x = 0; x < MAX_COLS_PIXELS; x++) {
+            GOP_FRAMEBUFFER[y * GOP_PIXELS_PER_SCANLINE + x] =
+                GOP_FRAMEBUFFER[(y + line_height) * GOP_PIXELS_PER_SCANLINE + x];
+        }
+    }
+
+    for (uint32_t y = MAX_HEIGHT - line_height; y < MAX_HEIGHT; y++) {
+        for (uint32_t x = 0; x < MAX_COLS_PIXELS; x++) {
+            GOP_FRAMEBUFFER[y * GOP_PIXELS_PER_SCANLINE + x] = 0;
+        }
+    }
+    global_cursor_y -= line_height;
+}
+
+void clear_screen() {
+    for (uint32_t i = 0; i < GOP_PIXELS_PER_SCANLINE * MAX_HEIGHT; i++) {
+        GOP_FRAMEBUFFER[i] = 0;
+    }
+    global_cursor_x = 10;
+    global_cursor_y = 30;
+}
+void change_resolution(uint32_t target_w, uint32_t target_h) {
+
+
+
+    MAX_COLS_PIXELS = target_w;
+    MAX_HEIGHT = target_h;
+
+
+    clear_screen(0x00000000);
+
+
+    global_cursor_x = 10;
+    global_cursor_y = 40;
+
+    kprint("change resolution success\n", 0x0A);
+}
+#include "GeistMonoLight20ptb4.h"
+
+uint32_t apply_intensity(uint32_t color, uint8_t intensity) {
+
+    uint32_t alpha = intensity * 17;
+
+    uint8_t r = ((color >> 16) & 0xFF) * alpha / 255;
+    uint8_t g = ((color >> 8) & 0xFF) * alpha / 255;
+    uint8_t b = (color & 0xFF) * alpha / 255;
+
+    return (r << 16) | (g << 8) | b;
+}
+void draw_char(char c, int x, int y, uint32_t color) {
+    if (c < 32 || c > 126) return;
+    const GFXglyph *glyph = &GeistMonoLight20ptb4Glyphs[c - 32];
+    const uint8_t  *bitmap = GeistMonoLight20ptb4Bitmaps;
+
+
+    int scale = 2;
+
+    uint32_t bo = glyph->bitmapOffset;
+    uint8_t  w  = glyph->width;
+    uint8_t  h  = glyph->height;
+    int8_t   xo = glyph->xOffset / scale;
+    int8_t   yo = glyph->yOffset / scale;
+
+    for (int yy = 0; yy < h; yy += scale) {
+        for (int xx = 0; xx < w; xx += scale) {
+            int pixel_index = (yy * w) + xx;
+            uint8_t byte_val = bitmap[bo + (pixel_index / 2)];
+            uint8_t intensity = (pixel_index % 2 == 0) ? (byte_val >> 4) : (byte_val & 0x0F);
+
+            if (intensity > 4) {
+                uint32_t final_pix = apply_intensity(color, intensity);
+
+
+                int px = x + xo + (xx / scale);
+                int py = y + yo + (yy / scale);
+if (px >= 0 && px < 1024 && py >= 0 && py < 768) {
+     
+    GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = final_pix; 
+}
+ 
+if (px >= 0 && (uint32_t)px < MAX_COLS_PIXELS && py >= 0 && (uint32_t)py < MAX_HEIGHT) {
+    GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = color;
+}
+            }
+        }
+    }
+}
+void kprint(char *message, unsigned char color) {
+    if (gui_mode_active) return;  
+
+    uint32_t rgb_color = vga_to_rgb(color);
+    for (int i = 0; message[i] != '\0'; i++) {
+        draw_terminal_cursor(global_cursor_x, global_cursor_y, 0);
+        if (message[i] == '\n') {
+            global_cursor_x = 10;
+            global_cursor_y += 36;
+        } else {
+            draw_char(message[i], global_cursor_x, global_cursor_y, rgb_color);
+            const GFXglyph *glyph = &GeistMonoLight20ptb4Glyphs[message[i] - 32];
+            global_cursor_x += (glyph->xAdvance / 2);
+        }
+    }
+}
+
+void wait(long long cycles) {
+    for(volatile long long i = 0; i < cycles; i++);
+}
+
+void acpi_shutdown(uint32_t PM1a_CNT_BLK, uint16_t SLP_TYP) {
+    uint16_t shutdown_command = SLP_TYP | 0x2000;
+    __asm__ __volatile__("cli");
+    outw(PM1a_CNT_BLK, shutdown_command);
+    while(1) { __asm__ __volatile__("hlt"); }
+}
+
+
+
+int find_file_in_current_dir(char *filename) {
+    for(int i = 0; i < MAX_FILES; i++) {
+        if(mrc_fs[i].is_active &&
+           !mrc_fs[i].is_directory &&
+           strcmp(mrc_fs[i].name, filename) == 0 &&
+           strcmp(mrc_fs[i].folder, current_dir) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+
+void execute_command(char *cmd) {
+    if (strcmp(cmd, "help") == 0) {
+        kprint("\ncommands: HELP, VER, CLEAR, LS, CAT, TOUCH, EDIT, ECHO, HALT, MKDIR, CD, RM, CHRES", YELLOW_ON_BLACK);
+    }
+    else if (strcmp(cmd, "ver") == 0) {
+        kprint("\nMRC Alpha X", GREEN_ON_BLACK);
+    }
+    else if (strcmp(cmd, "ls") == 0) {
+        cmd_ls();
+    }
+    else if (strcmp(cmd, "clear") == 0) {
+        clear_screen();
+    }
+    else if (strncmp(cmd, "echo ", 5) == 0) {
+        kprint("\n", YELLOW_ON_BLACK);
+        kprint(cmd + 5, YELLOW_ON_BLACK);
+    }
+    else if (strcmp(cmd, "echo") == 0) {
+        kprint("\nusage: echo <text>", YELLOW_ON_BLACK);
+    }
+    else if (strncmp(cmd, "cat ", 4) == 0) {
+        cmd_cat(cmd + 4);
+    }
+    else if (strcmp(cmd, "cat") == 0) {
+        kprint("\nusage: cat <file name>", YELLOW_ON_BLACK);
+    }
+    else if (strncmp(cmd, "touch ", 6) == 0) {
+        cmd_touch(cmd + 6);
+    }
+    else if (strcmp(cmd, "touch") == 0) {
+        kprint("\nusage: touch <file name>", YELLOW_ON_BLACK);
+    }
+    else if (strncmp(cmd, "edit ", 5) == 0) {
+        cmd_edit(cmd + 5);
+    }
+    else if (strcmp(cmd, "edit") == 0) {
+        kprint("\nusage: edit <file name>", YELLOW_ON_BLACK);
+    }
+    else if (strncmp(cmd, "mkdir ", 6) == 0) {
+        cmd_mkdir(cmd + 6);
+    }
+    else if (strcmp(cmd, "mkdir") == 0) {
+        kprint("\nusage: mkdir <directory name>", YELLOW_ON_BLACK);
+    }
+    else if (strncmp(cmd, "cd ", 3) == 0) {
+        cmd_cd(cmd + 3);
+    }
+    else if (strcmp(cmd, "cd") == 0) {
+        kprint("\nLocation: ", YELLOW_ON_BLACK);
+        kprint(current_dir, WHITE_ON_BLACK);
+    }
+    else if (strncmp(cmd, "rm ", 3) == 0) {
+        cmd_rm(cmd + 3);
+    }
+    else if (strcmp(cmd, "rm") == 0) {
+        kprint("\nusage: rm <file name>", YELLOW_ON_BLACK);
+    }
+    else if (strcmp(cmd, "halt") == 0) {
+        clear_screen();
+        kprint("\nkilling all processes...", GREEN_ON_BLACK);
+        wait(200000000);
+        __asm__("cli");
+        clear_screen();
+
+        char *bye = "\n\n\n            G O O D B Y E !!            ";
+        for(int i = 0; bye[i] != '\0'; i++) {
+            char t[2] = {bye[i], '\0'};
+            kprint(t, LBLUE_ON_BLACK);
+            wait(5000000);
+        }
+
+        wait(750000000);
+
+        acpi_shutdown(0x604, 0x2000);
+    }
+
+
+    else if (strncmp(cmd, "chres ", 6) == 0) {
+        uint32_t w = 0, h = 0;
+        char *p = cmd + 6;
+
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') w = w * 10 + (*p++ - '0');
+        while (*p == ' ') p++;
+        while (*p >= '0' && *p <= '9') h = h * 10 + (*p++ - '0');
+
+        if (w > 0 && h > 0) {
+            change_resolution(w, h);
+        } else {
+            kprint("\nusage: chres <width> <height>", YELLOW_ON_BLACK);
+        }
+    }
+    else if (strcmp(cmd, "chres") == 0) {
+        kprint("\nusage: chres <width> <height>", YELLOW_ON_BLACK);
+    }
+else if (strcmp(cmd, "gui") == 0) {
+    clear_screen();         
+    gui_mode_active = 1;     
+
+     
+    draw_rect(0, 0, 1024, 768, 0xFF1A1A2E); 
+    draw_rect(0, 728, 1024, 40, 0xFF16213E);  
+
+	Window terminal_win = {
+			.x = 100, .y = 100, .w = 600, .h = 400,
+			.bg_color = 0xFF0F3460, .title_color = 0xFFE94560,
+			.title = "Terminal v1"
+		};
+    create_window(&terminal_win);
+	}
+}
+void write_to_window(Window* win, char* text, int* win_cursor_x, int* win_cursor_y, uint32_t color) {
+     
+     
+
+    for (int i = 0; text[i] != '\0'; i++) {
+         
+        if (text[i] == '\n' || *win_cursor_x > (win->w - 20)) {
+            *win_cursor_x = 10;
+            *win_cursor_y += 25;  
+        }
+
+        if (text[i] != '\n') {
+             
+            int real_x = win->x + *win_cursor_x;
+            int real_y = win->y + 35 + *win_cursor_y;  
+
+             
+            if (real_x < (win->x + win->w - 5) && real_y < (win->y + win->h - 5)) {
+                draw_char(text[i], real_x, real_y, color);
+            }
+
+             
+            const GFXglyph *glyph = &GeistMonoLight20ptb4Glyphs[text[i] - 32];
+            *win_cursor_x += (glyph->xAdvance / 2);
+        }
+    }
+}
+
+void shell_input_handler() {
+    if (inb(0x64) & 0x01) {
+        unsigned char scancode = inb(0x60);
+
+
+
+        if (scancode == 0x2A || scancode == 0x36) { shift_pressed = 1; return; }
+        if (scancode == 0xAA || scancode == 0xB6) { shift_pressed = 0; return; }
+
+        if (scancode == 0x0E) {  
+            if (shell_ptr > 0) {
+                shell_ptr--;
+                char last_char = shell_buffer[shell_ptr];
+                const GFXglyph *glyph = &GeistMonoLight20ptb4Glyphs[last_char - 32];
+                global_cursor_x -= glyph->xAdvance;
+                 
+            }
+            return;
+        }
+
+        if (scancode & 0x80) return;  
+
+        if (scancode == 0x1C) {  
+            shell_buffer[shell_ptr] = '\0';
+            execute_command(shell_buffer);
+            shell_ptr = 0;
+            kprint("\nAlpha-X> ", WHITE_ON_BLACK);
+            return;
+        }
+
+        if (scancode < sizeof(scancode_to_ascii)) {
+            char ascii = scancode_to_ascii[scancode];
+            if (ascii != 0) {
+                if (shift_pressed && ascii >= 'a' && ascii <= 'z') ascii -= 32;
+                if (shell_ptr < 255) {
+                    shell_buffer[shell_ptr++] = ascii;
+                    char temp[2] = {ascii, '\0'};
+                    kprint(temp, WHITE_ON_BLACK);
+                }
+            }
+        }
+    }
+}  
+int cursor_visible = 0;
+uint32_t timer_counter = 0;
+
+void shell_loop() {
+    while(1) {
+handle_ps2_mouse(); 
+
+        if (gui_mode_active) {
+             
+             
+            continue; 
+        }
+        shell_input_handler();
+
+        timer_counter++;
+        if (timer_counter >= 5000000) {
+            cursor_visible = !cursor_visible;
+            timer_counter = 0;
+
+            if (cursor_visible) {
+                draw_terminal_cursor(global_cursor_x, global_cursor_y, 0xFFFFFFFF);
+            } else {
+                draw_terminal_cursor(global_cursor_x, global_cursor_y, 0x00000000);
+            }
+        }
+    }
+}
+void mouse_wait(uint8_t type) {
+    uint32_t timeout = 100000;
+    while (timeout--) {
+        if (type == 0 && (inb(0x64) & 1)) return;  
+        if (type == 1 && !(inb(0x64) & 2)) return;  
+    }
+}
+
+void mouse_write(uint8_t write) {
+    mouse_wait(1);
+    outb(0x64, 0xD4);
+    mouse_wait(1);
+    outb(0x60, write);
+}
+
+uint8_t mouse_read() {
+    mouse_wait(0);
+    return inb(0x60);
+}
+void mouse_init() {
+    uint8_t _status;
+
+     
+    while (inb(0x64) & 1) inb(0x60);
+
+     
+    outb(0x64, 0xA8);
+
+     
+    while (inb(0x64) & 2);
+    outb(0x64, 0x20);
+    while (!(inb(0x64) & 1));
+    _status = (inb(0x60) | 2);
+
+    while (inb(0x64) & 2);
+    outb(0x64, 0x60);
+    while (inb(0x64) & 2);
+    outb(0x60, _status);
+
+     
+    mouse_write(0xF3);  
+    mouse_read();
+    mouse_write(100);   
+    mouse_read();
+
+     
+    mouse_write(0xF4);
+    mouse_read();
+}
+void kprint_hex(uint64_t n) {
+    char hex_chars[] = "0123456789ABCDEF";
+    char buffer[19];
+    buffer[0] = '0';
+    buffer[1] = 'x';
+
+    for (int i = 15; i >= 0; i--) {
+        buffer[i + 2] = hex_chars[(n >> (i * 4)) & 0xF];
+    }
+    buffer[18] = '\0';
+    kprint(buffer, 0x0E);
+}
+static inline void outl(uint16_t port, uint32_t val) {
+    asm volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint32_t inl(uint16_t port) {
+    uint32_t ret;
+    asm volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+uint32_t pci_read(uint8_t bus, uint8_t device, uint8_t func, uint8_t offset) {
+    uint32_t address = (uint32_t)((bus << 16) | (device << 11) |
+                       (func << 8) | (offset & 0xfc) | ((uint32_t)0x80000000));
+
+
+    outl(0x0CF8, address);
+    return inl(0x0CFC);
+}
+void intel_write_mmio(uint64_t base, uint32_t reg, uint32_t data) {
+    volatile uint32_t* addr = (uint32_t*)(uintptr_t)(base + reg);
+    *addr = data;
+}
+
+uint32_t intel_read_mmio(uint64_t base, uint32_t reg) {
+    volatile uint32_t* addr = (uint32_t*)(uintptr_t)(base + reg);
+    return *addr;
+}
+void gpu_spy_mission() {
+    uint8_t bus = 0, dev = 2, func = 0;
+
+
+    uint32_t b0_low = pci_read(bus, dev, func, 0x10);
+    uint32_t b0_high = pci_read(bus, dev, func, 0x14);
+    uint64_t mmio_base = (((uint64_t)b0_high << 32) | (b0_low)) & ~0xFULL;
+
+
+    uint32_t b2_low = pci_read(bus, dev, func, 0x18);
+    uint32_t b2_high = pci_read(bus, dev, func, 0x1C);
+    uint64_t lfb_base = (((uint64_t)b2_high << 32) | (b2_low)) & ~0xFULL;
+
+    kprint("\n[GPU] MMIO Base: ", 0x0E);
+    kprint_hex(mmio_base);
+
+    kprint("\n[GPU] LFB Base: ", 0x0A);
+    kprint_hex(lfb_base);
+}
+#define VGA_CONTROL_REG 0x71400
+
+void disable_vga_compatibility(uint64_t mmio_base) {
+    uint32_t val = intel_read_mmio(mmio_base, VGA_CONTROL_REG);
+    intel_write_mmio(mmio_base, VGA_CONTROL_REG, val | (1 << 31));
+}
+void on_key_press(char key) {
+    if (gui_mode_active) return;  
+
+    if (shell_ptr < 255) {
+		terminal_win.x = 100;
+    terminal_win.y = 100;
+    terminal_win.w = 600;
+    terminal_win.h = 400;
+    terminal_win.bg_color = 0xFF0F3460;
+    terminal_win.title_color = 0xFFE94560;
+    strcpy(terminal_win.title, "Terminal v1");
+        shell_buffer[shell_ptr++] = key;
+        shell_buffer[shell_ptr] = '\0';
+        char t[2] = {key, '\0'};
+        kprint(t, WHITE_ON_BLACK);
+    }
+}
+ 
+
+unsigned int mouse_bg_buffer[64];  
+
+void draw_mouse_cursor(int x, int y) {
+    uint32_t color;
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            int px = x + j;
+            int py = y + i;
+
+             
+            if (px >= 0 && (uint32_t)px < MAX_COLS_PIXELS && py >= 0 && (uint32_t)py < MAX_HEIGHT) {
+                
+                 
+                mouse_bg_buffer[i * 8 + j] = GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px];
+
+                 
+                if (cursor_mask[i][j] == 1) {
+                    color = 0xFFFFFFFF;  
+                    GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = color;
+                } 
+                else if (cursor_mask[i][j] == 2) {
+                    color = 0x00000000;  
+                    GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = color;
+                }
+                 
+            }
+        }
+    }
+}
+ 
+
+
+void handle_ps2_mouse() {
+    while (inb(0x64) & 0x01) {  
+        uint8_t data = inb(0x60);
+        if (mouse_phase == 0 && !(data & 0x08)) continue;  
+
+        mouse_data[mouse_phase++] = data;
+
+        if (mouse_phase == 3) {
+            mouse_phase = 0;
+            
+             
+            clear_mouse_cursor(mouse_x, mouse_y);
+
+            int8_t rel_x = (int8_t)mouse_data[1];
+            int8_t rel_y = (int8_t)mouse_data[2];
+
+            mouse_x += rel_x;
+            mouse_y -= rel_y; 
+
+             
+            if (mouse_x < 0) mouse_x = 0;
+            if (mouse_y < 0) mouse_y = 0;
+            if (mouse_x > (int)MAX_COLS_PIXELS - 8) mouse_x = MAX_COLS_PIXELS - 8;
+            if (mouse_y > (int)MAX_HEIGHT - 8) mouse_y = MAX_HEIGHT - 8;
+
+             
+            draw_mouse_cursor(mouse_x, mouse_y);
+        }
+    }
+}
+}
+void clear_mouse_cursor(int x, int y) {
+    for (int i = 0; i < 8; i++) {
+        for (int j = 0; j < 8; j++) {
+            int px = x + j;
+            int py = y + i;
+            if (px >= 0 && px < MAX_COLS_PIXELS && py >= 0 && py < MAX_HEIGHT) {
+                GOP_FRAMEBUFFER[py * GOP_PIXELS_PER_SCANLINE + px] = mouse_bg_buffer[i * 8 + j];
+            }
+        }
+    }
+}
+void kmain(unsigned long addr) {
+    uint32_t *tags = (uint32_t *)(addr + 8);
+    while (tags[0] != 0) {
+        if (tags[0] == 8) {
+            GOP_FRAMEBUFFER = (uint32_t *)*((unsigned long long *)&tags[2]);
+            GOP_PIXELS_PER_SCANLINE = tags[5];
+            break;
+        }
+        tags += (tags[1] + 7) / 8 * 2;
+    }
+
+    if (GOP_FRAMEBUFFER == 0) {
+        GOP_FRAMEBUFFER = (uint32_t*)0xFD000000;
+        GOP_PIXELS_PER_SCANLINE = 1024;
+    }
+
+    init_fs();
+    clear_screen();
+    gpu_spy_mission();
+
+    kprint("\nsystem version: MRC Alpha X\nAlpha-X> ", WHITE_ON_BLACK);
+
+    while(1) {
+        shell_loop();
+    }
+}  
